@@ -1,0 +1,316 @@
+﻿using UnityEngine;
+using System.Collections;
+using Pathfinding;
+
+// villager has different status
+// if action is right click on tree
+// villager enters tree mining status
+// It checks whether he can mine tree 
+// (because of distance or because max carry)
+// If he cannot because of distance, then moves
+// if not because of carry, return to towncenter
+public class CoVillagerManager : MonoBehaviour
+{
+	public enum Status
+	{
+		Idle,
+		MovingToPoint,
+		MineStartMining,
+		MineStartMoveToMine,
+		MineMovingToMine,
+		MineStartMoveToStorage,
+		MineMovingToStorage,
+		MineMining,
+		MineDeposit,
+		MineSearchForMine
+	}
+
+	public int currentHealth;
+	Villager unit;
+	public Status status;
+
+	// Mining
+	GameObject associatedResource;
+	GameObject associatedStorage;
+	public int   resourceCarry;
+	public bool isMining;
+
+	// Worker status
+	bool isMiningWood;
+
+	// Movement
+	private Seeker seeker;
+	private CharacterController controller;
+	public Path path;
+	public float nextWaypointDistance = 3;
+	private int currentWaypoint = 0;
+	bool destinationReached;
+
+	//debug
+	int ncoroutine;
+	bool isequal;
+
+	void Awake()
+	{
+		// add it to unit list
+//		Debug.Log("Awaking " + this.gameObject);
+		GameMaster.unitObjects.Add(this.gameObject);
+		destinationReached = true;
+		isMiningWood = false;
+
+		// debug
+		ncoroutine = 0;
+		isequal = true;
+
+	}
+	
+	// Use this for initialization
+	void Start ()
+	{
+		unit = GetComponent<Villager> ();
+		seeker = GetComponent<Seeker>();
+		controller = GetComponent<CharacterController>();
+		currentHealth = unit.health;
+	}
+	
+	// Update is called once per frame
+	void Update ()
+	{
+		if( !isequal )
+		{
+			Debug.LogError("Not equal, now " + ncoroutine + " times");
+			isequal = true;
+		}
+		if (currentHealth <= 0) {
+			GameMaster.resources[4]++;
+			Destroy(gameObject);
+		}
+	}
+
+	void FixedUpdate ()
+	{
+		Vector3 gravity = Vector3.zero;
+		gravity.y = -20 * Time.fixedDeltaTime;
+		controller.Move (gravity);
+
+		if (path == null)
+		{
+			//We have no path to move after yet
+			return;
+		}
+		
+		if (currentWaypoint >= path.vectorPath.Count)
+		{
+//			Debug.Log ("End Of Path Reached");
+			destinationReached = true;
+			return;
+		}
+		
+		//Direction to the next waypoint
+		Vector3 dir = (path.vectorPath[currentWaypoint]-transform.position).normalized;
+		dir *= unit.speed * Time.fixedDeltaTime;
+		controller.SimpleMove (dir);
+		
+		//Check if we are close enough to the next waypoint
+		//If we are, proceed to follow the next waypoint
+		if (Vector3.Distance (transform.position, path.vectorPath[currentWaypoint]) < nextWaypointDistance)
+		{
+			currentWaypoint++;
+			return;
+		}
+	}
+
+//	void OnGUI ()
+//	{
+//		if (GUI.Button (new Rect (Screen.width * 0.5f, Screen.height - 300, 100, 30), "Hit Units")) {
+//			currentHealth -= 10;
+//		}
+//	}
+	
+	public void Action(object[] args)
+	{
+		Debug.Log ("not implemented yet");
+		if( (string)args[0] == "rc" )
+		{
+			GameObject go = (GameObject)args[1];
+//			Debug.Log ("saying move to " + (Vector3)args[2]);
+			Debug.Log ("saying move towards " + go.name);
+
+			if( go.name == "Terrain" )
+			{
+				StopAllCoroutines();
+				Move((Vector3)(args[2]));
+				status = Status.MovingToPoint;
+				isMining = false;
+			}
+			else if( go.tag == "Wood" )
+			{
+				Debug.Log ("Start mining wood");
+				isMiningWood = true;
+				if( !isMining || go != associatedResource )
+				{
+					associatedResource = go;
+					StopAllCoroutines();
+					StartCoroutine(StartMining());
+					Debug.Log ("Coroutine started");
+				}
+			}
+
+		}
+		Debug.Log ("Leaving action");
+	}
+
+	// Mining coroutine
+	// Moves to mine and mines until capacity
+	// is reached. Then goes to storage facility
+	// to drop the minerals
+	IEnumerator StartMining()
+	{
+		isMining = false;
+
+		while( true )
+		{
+			// move to mine
+			Move(associatedResource.transform.position, "To mine");
+
+			// wait until close enough
+			while( IsTooFarFromMine() )
+			{
+				yield return null;
+			}
+
+			// mine until full
+			while( resourceCarry < unit.resourceMaxCarry[0] )
+			{
+				isMining = true;
+				yield return new WaitForSeconds(unit.resourceMiningSpeed[0]);
+				isMining = false;
+				resourceCarry += 1;
+				Debug.Log("Sending mine message");
+				associatedResource.SendMessage("Mine");
+
+				// check if resource still exists, needs to 
+				// return yield so resource can update if removed
+				yield return null;
+				if( associatedResource == null )
+				{
+					if( !AssociateNewResouce() )
+						break;
+				}
+			}
+
+			// drop, move to storage
+			associatedStorage = LocateNearestStorageBuilding();
+			Move(associatedStorage.transform.position, "To storage");
+
+			// wait until close enough
+			while( IsTooFarFromStorage() )
+			{
+				yield return null;
+			}
+
+			// drop logic
+			GameMaster.resources[0] += resourceCarry;
+			resourceCarry = 0;
+
+			// if no more resources, end routine
+			if( associatedResource == null )
+			{
+				yield break;
+			}
+		}
+	}
+
+	bool AssociateNewResouce()
+	{
+		bool foundNew = false;
+
+		Collider[] hitColliders = Physics.OverlapSphere(unit.transform.position, 10, 512);
+		Debug.Log("Sphere hitted on " + hitColliders.Length);
+		foreach( Collider col in hitColliders )
+		{
+			Debug.Log(col);
+			if( col.tag == "Wood" )
+			{
+				associatedResource = col.gameObject;
+				foundNew = true;
+				break;
+			}
+		}
+
+		return foundNew;
+	}
+
+
+	GameObject LocateNearestStorageBuilding()
+	{
+		GameObject nearest;
+		float minimumDistance;
+
+		nearest = null;
+		minimumDistance = Mathf.Infinity;
+		foreach( GameObject tc in GameMaster.towncenterObjects )
+		{
+			if( minimumDistance > Vector3.Distance(unit.transform.position, tc.transform.position) )
+			{
+				minimumDistance = Vector3.Distance(unit.transform.position, tc.transform.position);
+				nearest = tc;
+			}
+		}
+		return nearest;
+	}
+
+	bool IsTooFarFromMine()
+	{
+		float distance;
+
+		distance = Vector3.Distance(associatedResource.transform.position, unit.transform.position);
+		//Debug.Log("Distance = " + distance);
+		
+		if( distance > 1.5 )
+			return true;
+		else
+			return false;
+	}
+
+	bool IsTooFarFromStorage()
+	{
+		float distance;
+
+		distance = Vector3.Distance(associatedStorage.transform.position, unit.transform.position);
+		//Debug.Log("Distance = " + distance);
+		
+		if( distance > 4 )
+			return true;
+		else
+			return false;
+	}
+	
+	public void Move(Vector3 position, string where = "nowhere")
+	{
+		Debug.LogError("Being called from " + where);
+		//Start a new path to the targetPosition, return the result to the OnPathComplete function
+		seeker.StartPath (transform.position, position, OnPathComplete);
+	}
+	
+	public void Gather(GameObject resource)
+	{
+		Debug.Log ("not implemented yet");
+	}
+
+	public void Drop()
+	{
+		Debug.Log ("not implemented yet");
+	}
+
+	public void OnPathComplete (Path p)
+	{
+//		Debug.Log ("Yey, we got a path back. Did it have an error? "+p.error);
+		if (!p.error) {
+			path = p;
+			//Reset the waypoint counter
+			currentWaypoint = 0;
+			destinationReached = false;
+		}
+	}
+}

@@ -1,0 +1,8 @@
+﻿using UnityEngine;
+using System.Collections;
+
+public class UnitsInfo
+{
+	public static int[,] unitCosts = new int[2,5] {{0, 50, 0, 0, 1}, {20, 100, 0, 0, 1}};
+	public static string[] unitNames = new string[2] {"Villager", "Spearman"};
+}
