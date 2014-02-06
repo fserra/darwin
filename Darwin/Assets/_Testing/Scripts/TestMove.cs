@@ -9,6 +9,6 @@ public class TestMove : MonoBehaviour
 	// Use this for initialization
 	void Start ()
 	{
-		Manager.Move (target.position);
+		//Manager.Move (target.position);
 	}
 }

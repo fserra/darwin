@@ -1,5 +1,6 @@
 ﻿using UnityEngine;
 using System.Collections;
+using System.Collections.Generic;
 using Pathfinding;
 
 // villager has different status
@@ -25,6 +26,23 @@ public class VillagerManager : MonoBehaviour
             MineSearchForMine
     }
 
+    // actions management
+    public struct action
+    {
+        public string name;
+        public object[] args;
+
+        // constructur
+        public action(string name)
+        {
+            this.name = name;
+            this.args = null;
+        }
+    }
+    LinkedList<action> actions = new LinkedList<action>();
+
+
+    // stats
     public int currentHealth;
     Villager unit;
     public Status status;
@@ -61,7 +79,6 @@ public class VillagerManager : MonoBehaviour
         // debug
         ncoroutine = 0;
         isequal = true;
-
     }
 
     // Use this for initialization
@@ -129,35 +146,53 @@ public class VillagerManager : MonoBehaviour
 
     public void Action(object[] args)
     {
-        Debug.Log ("not implemented yet");
         if( (string)args[0] == "rc" )
         {
             GameObject go = (GameObject)args[1];
             //Debug.Log ("saying move to " + (Vector3)args[2]);
             Debug.Log ("saying move towards " + go.name);
-
+            
+            // process action
             if( go.name == "Terrain" )
             {
+                actions.Clear();
+
                 StopAllCoroutines();
-                Move((Vector3)(args[2]));
-                status = Status.MovingToPoint;
-                isMining = false;
+                action move = new action();
+                move.name = "Move";
+                move.args = new object[1];
+                move.args[0] = (Vector3)(args[2]);
+                actions.AddFirst(move);
+                actions.AddLast(new action("Idle"));
             }
-            // FIXME: maybe tag them resources and obtain the type
-            // from the game object? Until now logic is the same
             else if( go.tag == "Wood" )
             {
                 Debug.Log ("Start mining wood");
                 if( !isMining || go != associatedResource )
                 {
-                    associatedResource = go;
-                    resourceType = 0;
-                    resourceName = go.tag;
-                    resource = go.GetComponent<ResourceManager>();
-                    resourcePosition = go.transform.position;
+                    actions.Clear();
                     StopAllCoroutines();
-                    StartCoroutine(StartMining());
-                    Debug.Log ("Coroutine started");
+
+                    action moveMine = new action("Move");
+                    moveMine.args = new object[1];
+                    moveMine.args[0] = go.transform.position;
+
+                    action mine = new action("Mine");
+                    mine.args = new object[1];
+                    mine.args[0] = go;
+
+                    action findstorage = new action("FindStorage");
+
+                    action moveStorage = new action("Move");
+                    moveStorage.args = new object[1];
+
+                    action drop = new action("Drop");
+
+                    actions.AddFirst(moveMine);
+                    actions.AddLast(mine);
+                    actions.AddLast(findstorage);
+                    actions.AddLast(moveStorage);
+                    actions.AddLast(drop);
                 }
             }
             else if( go.tag == "Food" )
@@ -171,96 +206,171 @@ public class VillagerManager : MonoBehaviour
                     resource = go.GetComponent<ResourceManager>();
                     resourcePosition = go.transform.position;
                     StopAllCoroutines();
-                    StartCoroutine(StartMining());
+                    //StartCoroutine(StartMining());
                     Debug.Log ("Coroutine started");
                 }
             }
 
+            ExecAction(actions.First);
+        }
+        else
+        {
+            Debug.Log ("not implemented yet");
         }
         Debug.Log ("Leaving action");
     }
 
+    // execute actions
+    void ExecAction(LinkedListNode<action> actionNode)
+    {
+        if( actions.Count == 0 )
+        {
+            Debug.LogError("There should be at least one action");
+            return;
+        }
 
-    // Mining coroutine
-    // Moves to mine and mines until capacity
-    // is reached. Then goes to storage facility
-    // to drop the minerals
-    // The mining process is defined as follows: the miner first checks whether
-    // the resource still exists (another miner could have extract it all
-    // while he was walking towards the resource). In case it doesn't exist,
-    // the miner looks for a near mine of the same type. Then 
-    // it extracts one mineral right away  and then takes unit.resourceMiningSpeed
-    // seconds to process the taken mineral. This way we avoid the possibility 
-    // of being waiting for a mineral, meanwhile another unit takes the last mineral.
-    IEnumerator StartMining()
+        action act = actionNode.Value;
+
+        if( act.name == "Move" )
+        {
+            Debug.Log("Executing move");
+            StartCoroutine(ActionMove(actionNode));
+        }
+        else if( act.name == "Idle" )
+        {
+            Debug.Log("Executing idle action");
+            StopAllCoroutines();
+            return;
+        }
+        else if( act.name == "Mine" )
+        {
+            Debug.Log("Executing mine");
+            StartCoroutine(Mine(actionNode));
+            return;
+        }
+        else if( act.name == "FindStorage" )
+        {
+            Debug.Log("Executing findstorage");
+            FindStorage(actionNode);
+            return;
+        }
+        else if( act.name == "Drop" )
+        {
+            Debug.Log("Executing drop");
+            Drop(actionNode);
+            return;
+        }
+        else
+        {
+            Debug.LogError("Unkown action " + act.name);
+            return;
+        }
+    }
+
+    // Moving action. Tells the objecto to move
+    // and when it completes the movement, goes
+    // to the next action
+    // NOTE: might be slow?
+    IEnumerator ActionMove(LinkedListNode<action> actionNode)
+    {
+        Debug.Log("actions " + actions.Count);
+        action act = actionNode.Value;
+
+        Move((Vector3)act.args[0]);
+
+        yield return null;
+        while( currentWaypoint < path.vectorPath.Count )
+            yield return new WaitForSeconds(0.1f);
+
+        Debug.Log("Finish moving. should go to next action");
+        ExecAction(NextAction(actionNode));
+    }
+
+    // Circular behavior on LinkedList
+    public LinkedListNode<action> NextAction(LinkedListNode<action> node)
+    {
+        return node.Next == null ? node.List.First : node.Next;
+    }
+
+    // mines until max capacity is reached or resources are over
+    // In case current mining resource is over the miner looks 
+    // for a near mine of the same type to continue mining.
+    IEnumerator Mine(LinkedListNode<action> actionNode)
     {
         isMining = false;
+        GameObject go = (GameObject)actionNode.Value.args[0];
+        // There must be a better way of doing this
+        resource = go.GetComponent<ResourceManager>();
+        resourcePosition = go.transform.position;
+        associatedResource = go;
 
-        while( true )
+        // should be close enough
+        if( IsTooFarFromMine() )
         {
-            // move to mine
-            Move(resourcePosition, "To mine");
+            Debug.LogError("Move failed, too far for mining");
+            yield break;
+        }
 
-            // wait until close enough
-            while( IsTooFarFromMine() )
+        // if mine doesn't exist, look for a new one and start again
+        // if non is found, end routine
+        if( !IsResourceAvailable() )
+        {
+            Debug.Log("resource not available");
+            if( !AssociateNewResouce() )
             {
-                Debug.Log("Moving to mine");
-                yield return null;
+                Debug.Log("should get idle");
+                yield break;
             }
-            Debug.Log("got to mine");
+        }
+        Debug.Log("resource is available");
 
-            // if mine doesn't exist, look for a new one and start again
-            // if non is found, end routine
+        // mine until full
+        while( resourceCarry < unit.resourceMaxCarry[resourceType] )
+        {
+            Debug.Log("gathering");
+            // check if resource still exists and is minable
+            // NOTE: could it be that the resource
+            // stops existing but this wasn't updated?
             if( !IsResourceAvailable() )
             {
-                Debug.Log("resource not available");
-                if( AssociateNewResouce() )
-                    continue;
-                else
-                    yield break;
-            }
-            Debug.Log("resource is available");
-
-            // mine until full
-            while( resourceCarry < unit.resourceMaxCarry[resourceType] )
-            {
-                Debug.Log("mining");
-                // check if resource still exists and is minable
-                // NOTE: could it be that the resource
-                // stops existing but this wasn't updated?
-                if( !IsResourceAvailable() )
-                {
-                    if( !AssociateNewResouce() )
-                        break;
-                }
-
-                isMining = true;
-                yield return new WaitForSeconds(unit.resourceMiningSpeed[resourceType]);
-                resource.Mine();
-                isMining = false;
-                resourceCarry += 1;
-
+                if( !AssociateNewResouce() )
+                    break;
             }
 
-            // drop, move to storage only if carrying resource
-            if( resourceCarry > 0 )
-            {
-                associatedStorage = LocateNearestStorageBuilding();
-                Move(associatedStorage.transform.position, "To storage");
-
-                // wait until close enough
-                while( IsTooFarFromStorage() )
-                {
-                    yield return null;
-                }
-
-                // drop logic
-                GameMaster.resources[resourceType] += resourceCarry;
-                resourceCarry = 0;
-            }
-            else
-                yield break;
+            isMining = true;
+            yield return new WaitForSeconds(unit.resourceMiningSpeed[resourceType]);
+            resource.Mine();
+            resourceCarry += 1;
+            isMining = false;
         }
+
+        ExecAction(NextAction(actionNode));
+    }
+
+    // look for closest storage
+    public void FindStorage(LinkedListNode<action> actionNode)
+    {
+        associatedStorage = LocateNearestStorageBuilding();
+
+        actionNode.Next.Value.args[0] = associatedStorage.transform.position;
+        ExecAction(NextAction(actionNode));
+    }
+
+    // drop minerals on storage
+    public void Drop(LinkedListNode<action> actionNode)
+    {
+        // should be close enough
+        if( IsTooFarFromStorage() )
+        {
+            Debug.LogError("Move failed, too far to drop");
+            return;
+        }
+
+        // drop logic
+        GameMaster.resources[resourceType] += resourceCarry;
+        resourceCarry = 0;
+
+        ExecAction(NextAction(actionNode));
     }
 
 
@@ -320,7 +430,7 @@ public class VillagerManager : MonoBehaviour
         float distance;
 
         distance = Vector3.Distance(resourcePosition, unit.transform.position);
-        //Debug.Log("Distance = " + distance);
+        Debug.Log("Distance from mine = " + distance);
 
         if( distance > 1.5 )
             return true;
@@ -341,11 +451,11 @@ public class VillagerManager : MonoBehaviour
             return false;
     }
 
-    public void Move(Vector3 position, string where = "nowhere")
+    public void Move(Vector3 position)
     {
-        Debug.LogError("Being called from " + where);
         //Start a new path to the targetPosition, return the result to the OnPathComplete function
         seeker.StartPath (transform.position, position, OnPathComplete);
+
     }
 
     public void Gather(GameObject resource)
@@ -353,10 +463,6 @@ public class VillagerManager : MonoBehaviour
         Debug.Log ("not implemented yet");
     }
 
-    public void Drop()
-    {
-        Debug.Log ("not implemented yet");
-    }
 
     public void OnPathComplete (Path p)
     {
